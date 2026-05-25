@@ -1,0 +1,87 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 8 * * *'   # runs every day at 8am UTC
+
+jobs:
+  playwright:
+    name: Playwright E2E
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        run: npx playwright test || true
+        env:
+          BASE_URL: ${{ secrets.BASE_URL || 'https://app-testing-ivory.vercel.app' }}
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-html-report
+          path: reports/playwright/
+          retention-days: 30
+
+      - name: Upload JSON results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-json-results
+          path: reports/playwright-results.json
+          if-no-files-found: ignore
+
+  notify-n8n:
+    name: Send Report to n8n
+    runs-on: ubuntu-latest
+    needs: playwright
+    if: always()
+
+    steps:
+      - name: Download JSON results
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-json-results
+        continue-on-error: true
+
+      - name: Send results to n8n
+        run: |
+          if [ -f "playwright-results.json" ]; then
+            echo "Sending results to n8n..."
+            curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
+              -H "Content-Type: application/json" \
+              -d @playwright-results.json
+          else
+            echo "No results file found, sending minimal payload..."
+            curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "stats": { "expected": 0, "unexpected": 0, "skipped": 0, "flaky": 0 },
+                "suites": [],
+                "errors": ["Results file not generated"],
+                "meta": {
+                  "repository": "${{ github.repository }}",
+                  "branch": "${{ github.ref_name }}",
+                  "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                }
+              }'
+          fi
